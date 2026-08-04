@@ -40,8 +40,8 @@ export const configSchematics = createConfigSchematics()
     "charLimit",
     "numeric",
     {
-      displayName: "Character Limit",
-      subtitle: "Limits the number of characters (NOT tokens) returned from a single wiki_fetch tool call (-1 = no limit).",
+      displayName: "Characters Per Page",
+      subtitle: "Limits the number of characters (NOT tokens) returned on each wiki_fetch page (-1 = no pagination).",
       min: -1,
       max: Number.MAX_SAFE_INTEGER,
       int: true,

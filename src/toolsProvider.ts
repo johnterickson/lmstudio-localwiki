@@ -276,10 +276,29 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 	const searchSummaryEnabled = config.get("searchSummary");
 	const charLimit = config.get("charLimit");
 
-	const truncateIfNeeded = (text: string): string => {
-		if (charLimit === -1) return text;
-		if (text.length <= charLimit) return text;
-		return text.slice(0, charLimit) + "\n\n... (truncated due to character limit)";
+	const paginate = (content: string, page: number) => {
+		if (charLimit === 0 || charLimit < -1) {
+			throw new Error("Character limit must be -1 or a positive integer");
+		}
+
+		const pageSize = charLimit === -1 ? Math.max(content.length, 1) : charLimit;
+		const totalPages = Math.max(1, Math.ceil(content.length / pageSize));
+		if (page > totalPages) {
+			throw new Error(`Page ${page} is out of range (total pages: ${totalPages})`);
+		}
+
+		const start = (page - 1) * pageSize;
+		return {
+			content: content.slice(start, start + pageSize),
+			pagination: {
+				page,
+				pageSize: charLimit === -1 ? null : pageSize,
+				totalPages,
+				totalCharacters: content.length,
+				hasPreviousPage: page > 1,
+				hasNextPage: page < totalPages,
+			},
+		};
 	};
 
 	const wikiListTool = tool({
@@ -390,6 +409,7 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 			'refs': Returns only the 'References' section as a numbered list.
 				External links are shown as '<URL>'.
 				Use this only when you need external links, or the user asks for references/sources.
+		- page: 1-based page number. Use pagination.hasNextPage to determine whether to fetch another page.
 		`,
 	parameters: {
 		name: z.string().describe("Book name from your 'wiki_list' tool call"),
@@ -398,8 +418,9 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 		.enum(["intro", "full", "refs"])
 		.default("intro")
 		.describe("Article content to fetch"),
+		page: z.number().int().min(1).default(1).describe("1-based page number"),
 	},
-	implementation: async ({ name, path, content }) => {
+	implementation: async ({ name, path, content, page }) => {
 		const initialUrl = new URL(`/content/${name}/${path.split("#")[0]}`, baseUrl).toString();
 		const initialFragment = path.includes("#") ? path.split("#")[1] : null;
 
@@ -416,7 +437,7 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 			if (effectiveFragment) {
 				const subsectionContent = extractSubsectionByFragment($, container, effectiveFragment);
 				if (subsectionContent) {
-					return truncateIfNeeded(subsectionContent);
+					return paginate(subsectionContent, page);
 				}
 			}
 
@@ -447,17 +468,17 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 			}
 
 			const result = paragraphs.filter(Boolean).join("\n\n");
-			return truncateIfNeeded(result);
+			return paginate(result, page);
 		}
 
 		if (content === "refs") {
 			const refLines = extractReferencesArray($);
 			if (refLines.length === 0) {
-				return truncateIfNeeded("No references section found.");
+				return paginate("No references section found.", page);
 			}
 			const numbered = refLines.map((line, idx) => `${idx + 1}. ${line}`);
 			const result = numbered.join("\n\n");
-			return truncateIfNeeded(result);
+			return paginate(result, page);
 		}
 
 		const containerHtml = container.clone().html() ?? "";
@@ -503,7 +524,7 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 		});
 
 		const fullResult = output.join("\n\n").trim();
-		return truncateIfNeeded(fullResult);
+		return paginate(fullResult, page);
 	},
 	});
 
