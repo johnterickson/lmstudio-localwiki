@@ -359,15 +359,23 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 		description: text`
 		Search within a specific book for articles.
 		Parameters:
-		- name: book name from your 'wiki_list' tool call.
-		- query: search term.
+		- name (required): exact machine-readable 'name' from your 'wiki_list' tool call, NOT its display 'title'.
+		- query (required): search term.
 		Returns relevant articles with 'title' and 'path'.
 		There could be an extra 'summary' section if the user enables it.
 		Use the 'path' field (NOT 'title') in 'wiki_fetch' tool to retrieve the article.
 		`,
 	parameters: {
-		name: z.string().describe("Book name from your 'wiki_list' tool call"),
-		query: z.string().describe("Search term"),
+		name: z
+			.string()
+			.trim()
+			.min(1, "name is required; call wiki_list and use its exact name field, not title")
+			.describe("Exact machine-readable book name returned by wiki_list, not its title"),
+		query: z
+			.string()
+			.trim()
+			.min(1, "query is required and cannot be empty")
+			.describe("Non-empty article search term"),
 	},
 	implementation: async ({ name, query }) => {
 		const params = new URLSearchParams({
@@ -375,10 +383,31 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 			pattern: query,
 		});
 		const url = new URL(`/search?${params.toString()}`, baseUrl).toString();
-		const resp = await fetch(url);
+		let resp;
+		try {
+			resp = await fetch(url);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			throw new Error(
+				`Unable to reach Kiwix while searching name="${name}" for query="${query}" at ${url}. ` +
+				`Check the configured Kiwix Endpoint and confirm the server is running. Cause: ${message}`
+			);
+		}
 		if (!resp.ok) {
 			const body = await resp.text().catch(() => "");
-			throw new Error(`Search failed (${resp.status}): ${body.slice(0, 200)}`);
+			if (resp.status === 400) {
+				throw new Error(
+					`Kiwix rejected the search (HTTP 400) for name="${name}" and query="${query}". ` +
+					`The name must be the exact machine-readable name from wiki_list, not a display title such as "Baseball". ` +
+					`Call wiki_list again and copy its name field into wiki_search.`
+				);
+			}
+
+			const responseSummary = summarizeResponseBody(body);
+			throw new Error(
+				`Kiwix returned HTTP ${resp.status} while searching name="${name}" for query="${query}" ` +
+				`at ${resp.url || url}.${responseSummary ? ` Response: ${responseSummary}` : ""}`
+			);
 		}
 		const html = await resp.text();
 		const $ = cheerio.load(html);
