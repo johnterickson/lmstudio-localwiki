@@ -108,6 +108,23 @@ function removeReferencesSection($: cheerio.CheerioAPI): void {
 
 const MAX_REDIRECTS = 5;
 
+class HttpError extends Error {
+	constructor(
+		readonly status: number,
+		readonly url: string,
+		readonly responseBody: string
+	) {
+		super(`HTTP ${status}`);
+		this.name = "HttpError";
+	}
+}
+
+function summarizeResponseBody(body: string): string {
+	if (!body) return "";
+	const $ = cheerio.load(body);
+	return normalizeWhitespace($.text()).slice(0, 200);
+}
+
 async function fetchWithRedirects(
 	initialUrl: string,
 	redirectCount = 0
@@ -119,7 +136,7 @@ async function fetchWithRedirects(
 	const resp = await fetch(initialUrl);
 	if (!resp.ok) {
 		const body = await resp.text().catch(() => "");
-		throw new Error(`Fetch failed (${resp.status}): ${body.slice(0, 200)}`);
+		throw new HttpError(resp.status, resp.url || initialUrl, body);
 	}
 
 	const currentUrl = resp.url;
@@ -397,9 +414,9 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 		description: text`
 		Fetch and return parts of an article.
 		Parameters:
-		- name: book name from your 'wiki_list' tool call.
-		- path: article path from your 'wiki_search' tool call.
-		- content: which part of the article to fetch, use one of the following:
+		- name (required): exact book name from your 'wiki_list' tool call.
+		- path (required): exact article path from your 'wiki_search' tool call for the same book.
+		- content (optional, defaults to 'intro'): which part of the article to fetch:
 			'intro': Returns only the introduction section. Use this as DEFAULT for casual inquiries.
 			'full': Returns the complete article, but excluding the 'References' section.
 				Citation marks are in square brackets, such as [1].
@@ -409,11 +426,19 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 			'refs': Returns only the 'References' section as a numbered list.
 				External links are shown as '<URL>'.
 				Use this only when you need external links, or the user asks for references/sources.
-		- page: 1-based page number. Use pagination.hasNextPage to determine whether to fetch another page.
+		- page (optional, defaults to 1): 1-based page number. Use pagination.hasNextPage to determine whether to fetch another page.
 		`,
 	parameters: {
-		name: z.string().describe("Book name from your 'wiki_list' tool call"),
-		path: z.string().describe("Path from your 'wiki_search' tool call"),
+		name: z
+			.string()
+			.trim()
+			.min(1, "name is required; call wiki_list and use its exact name field")
+			.describe("Exact book name returned by wiki_list"),
+		path: z
+			.string()
+			.trim()
+			.min(1, "path is required; call wiki_search and use its exact path field")
+			.describe("Exact article path returned by wiki_search for the same book"),
 		content: z
 		.enum(["intro", "full", "refs"])
 		.default("intro")
@@ -421,10 +446,38 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 		page: z.number().int().min(1).default(1).describe("1-based page number"),
 	},
 	implementation: async ({ name, path, content, page }) => {
-		const initialUrl = new URL(`/content/${name}/${path.split("#")[0]}`, baseUrl).toString();
+		const articlePath = path.split("#")[0];
+		const initialUrl = new URL(`/content/${name}/${articlePath}`, baseUrl).toString();
 		const initialFragment = path.includes("#") ? path.split("#")[1] : null;
 
-		const { html, finalUrl, fragment: redirectFragment } = await fetchWithRedirects(initialUrl);
+		let fetchResult: Awaited<ReturnType<typeof fetchWithRedirects>>;
+		try {
+			fetchResult = await fetchWithRedirects(initialUrl);
+		} catch (error) {
+			if (error instanceof HttpError) {
+				if (error.status === 404) {
+					throw new Error(
+						`Article not found (HTTP 404) for name="${name}" and path="${articlePath}". ` +
+						`No required argument is missing; page is optional and defaults to 1. ` +
+						`Call wiki_list to verify the name, then call wiki_search with that same name and copy its exact path into wiki_fetch.`
+					);
+				}
+
+				const responseSummary = summarizeResponseBody(error.responseBody);
+				throw new Error(
+					`Kiwix returned HTTP ${error.status} while fetching name="${name}" and path="${articlePath}" ` +
+					`from ${error.url}.${responseSummary ? ` Response: ${responseSummary}` : ""}`
+				);
+			}
+
+			const message = error instanceof Error ? error.message : String(error);
+			throw new Error(
+				`Unable to reach Kiwix while fetching name="${name}" and path="${articlePath}" from ${initialUrl}. ` +
+				`Check the configured Kiwix Endpoint and confirm the server is running. Cause: ${message}`
+			);
+		}
+
+		const { html, finalUrl, fragment: redirectFragment } = fetchResult;
 		const $ = cheerio.load(html);
 		const container = $(".mw-parser-output");
 		if (!container.length) {
