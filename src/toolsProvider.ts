@@ -125,6 +125,10 @@ function summarizeResponseBody(body: string): string {
 	return normalizeWhitespace($.text()).slice(0, 200);
 }
 
+function decodeHtmlEntities(value: string): string {
+	return cheerio.load(value).text();
+}
+
 async function fetchWithRedirects(
 	initialUrl: string,
 	redirectCount = 0
@@ -357,7 +361,8 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 	const wikiSearchTool = tool({
 		name: "wiki_search",
 		description: text`
-		Search within a specific book for articles.
+		Search within a specific book for articles. Returns the first exact or prefix title match first,
+		followed by full-text matches, with duplicate paths removed.
 		Parameters:
 		- name (required): exact machine-readable 'name' from your 'wiki_list' tool call, NOT its display 'title'.
 		- query (required): search term.
@@ -383,9 +388,17 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 			pattern: query,
 		});
 		const url = new URL(`/search?${params.toString()}`, baseUrl).toString();
+		const suggestionParams = new URLSearchParams({
+			content: name,
+			term: query,
+			count: "1",
+			start: "0",
+		});
+		const suggestionUrl = new URL(`/suggest?${suggestionParams.toString()}`, baseUrl).toString();
 		let resp;
+		let suggestionResp;
 		try {
-			resp = await fetch(url);
+			[resp, suggestionResp] = await Promise.all([fetch(url), fetch(suggestionUrl)]);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			throw new Error(
@@ -409,6 +422,46 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 				`at ${resp.url || url}.${responseSummary ? ` Response: ${responseSummary}` : ""}`
 			);
 		}
+		if (!suggestionResp.ok) {
+			const body = await suggestionResp.text().catch(() => "");
+			const responseSummary = summarizeResponseBody(body);
+			throw new Error(
+				`Kiwix returned HTTP ${suggestionResp.status} while finding an exact or prefix title match ` +
+				`for name="${name}" and query="${query}" at ${suggestionResp.url || suggestionUrl}.` +
+				`${responseSummary ? ` Response: ${responseSummary}` : ""}`
+			);
+		}
+
+		let suggestions: unknown;
+		try {
+			suggestions = JSON.parse(await suggestionResp.text());
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			throw new Error(`Kiwix returned invalid suggestion JSON from ${suggestionUrl}. Cause: ${message}`);
+		}
+		if (!Array.isArray(suggestions)) {
+			throw new Error(`Kiwix returned an unexpected suggestion response from ${suggestionUrl}.`);
+		}
+
+		const prefixResults: Array<{ title: string; path: string }> = [];
+		for (const suggestion of suggestions) {
+			if (
+				typeof suggestion === "object" &&
+				suggestion !== null &&
+				"kind" in suggestion &&
+				suggestion.kind === "path" &&
+				"value" in suggestion &&
+				typeof suggestion.value === "string" &&
+				"path" in suggestion &&
+				typeof suggestion.path === "string"
+			) {
+				prefixResults.push({
+					title: decodeHtmlEntities(suggestion.value),
+					path: decodeHtmlEntities(suggestion.path),
+				});
+			}
+		}
+
 		const html = await resp.text();
 		const $ = cheerio.load(html);
 
@@ -431,8 +484,15 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 				results.push(result);
 			}
 		});
+		const seenPaths = new Set<string>();
+		const mergedResults = [...prefixResults, ...results].filter(result => {
+			if (seenPaths.has(result.path)) return false;
+			seenPaths.add(result.path);
+			return true;
+		});
+
 		return {
-			results: results.slice(0, searchLimit),
+			results: mergedResults.slice(0, searchLimit),
 			hint: text`If the results are irrelevant or empty, try shortening the search query.`
 		};
 	},
