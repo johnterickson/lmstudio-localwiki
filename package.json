@@ -4,6 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
+    "benchmark": "tsx src/benchmark.ts",
     "dev": "lms dev",
     "push": "lms push"
   },
@@ -16,6 +17,8 @@
     "node-fetch": "^3.2.2"
   },
   "devDependencies": {
-    "@types/node": "^20.14.8"
+    "@types/node": "^20.14.8",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
   }
 }
