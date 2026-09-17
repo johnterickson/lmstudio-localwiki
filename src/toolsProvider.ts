@@ -296,6 +296,39 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 	const searchLimit = config.get("searchLimit");
 	const searchSummaryEnabled = config.get("searchSummary");
 	const charLimit = config.get("charLimit");
+	let bookNamePromise: Promise<string> | undefined;
+
+	const getBookName = () => {
+		bookNamePromise ??= (async () => {
+			const url = new URL("/catalog/v2/entries?count=-1", baseUrl).toString();
+			const resp = await fetch(url);
+			if (!resp.ok) {
+				const body = await resp.text().catch(() => "");
+				throw new Error(`Failed to fetch the Kiwix catalog at ${url} (${resp.status}): ${body.slice(0, 200)}`);
+			}
+
+			const xmlText = await resp.text();
+			const $ = cheerio.load(xmlText, { xmlMode: true });
+			const names = $("entry")
+				.map((_, entry) => {
+					const linkHref = $(entry)
+						.find('link[type="text/html"]')
+						.attr("href")
+						?.trim();
+					return linkHref?.replace(/^\/content\//, "") ?? "";
+				})
+				.get()
+				.filter(Boolean);
+
+			if (names.length !== 1) {
+				throw new Error(`Expected exactly one ZIM in Kiwix, but found ${names.length}.`);
+			}
+
+			return names[0];
+		})();
+
+		return bookNamePromise;
+	};
 
 	const paginate = (content: string, page: number) => {
 		if (charLimit === 0 || charLimit < -1) {
@@ -322,67 +355,27 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 		};
 	};
 
-	const wikiListTool = tool({
-		name: "wiki_list",
-		description: text`
-		Lists all available books.
-		You MUST invoke this tool first to get the book names for your other tool calls.
-		Use the the 'name' field (NOT 'title') for other tools.
-		If you can't find relevant results in one book, try another.
-		`,
-		parameters: {},
-		implementation: async () => {
-			const url = new URL("/catalog/v2/entries?count=-1", baseUrl).toString();
-			const resp = await fetch(url);
-			if (!resp.ok) {
-				const body = await resp.text().catch(() => "");
-				throw new Error(`Failed to fetch ${url} (${resp.status}): ${body.slice(0, 200)}`);
-			}
-			const xmlText = await resp.text();
-			const $ = cheerio.load(xmlText, { xmlMode: true });
-
-			const entries: Array<{ title: string; summary: string; name: string }> = [];
-			$("entry").each((_, entry) => {
-				const title = $(entry).find("title").text().trim();
-				const summary = $(entry).find("summary").text().trim();
-				const linkHref = $(entry)
-				.find('link[type="text/html"]')
-				.attr("href")
-				?.trim();
-				const name = linkHref ? linkHref.replace(/^\/content\//, "") : "";
-				if (title && name) {
-					entries.push({ title, summary, name });
-				}
-			});
-			return entries;
-		},
-	});
-
 	const wikiSearchTool = tool({
 		name: "wiki_search",
 		description: text`
-		Search within a specific book for articles. Returns the first exact or prefix title match first,
+		Search the local Wikipedia archive for articles. Returns the first exact or prefix title match first,
 		followed by full-text matches, with duplicate paths removed.
 		Parameters:
-		- name (required): exact machine-readable 'name' from your 'wiki_list' tool call, NOT its display 'title'.
-		- query (required): search term.
+		- query (required): concise article title or search terms.
 		Returns relevant articles with 'title' and 'path'.
 		There could be an extra 'summary' section if the user enables it.
-		Use the 'path' field (NOT 'title') in 'wiki_fetch' tool to retrieve the article.
+		Use an exact returned 'path' (NOT 'title') with wiki_fetch to retrieve an article.
+		If results are irrelevant or empty, shorten or rephrase the query.
 		`,
 	parameters: {
-		name: z
-			.string()
-			.trim()
-			.min(1, "name is required; call wiki_list and use its exact name field, not title")
-			.describe("Exact machine-readable book name returned by wiki_list, not its title"),
 		query: z
 			.string()
 			.trim()
 			.min(1, "query is required and cannot be empty")
-			.describe("Non-empty article search term"),
+			.describe("Concise article title or search terms"),
 	},
-	implementation: async ({ name, query }) => {
+	implementation: async ({ query }) => {
+		const name = await getBookName();
 		const params = new URLSearchParams({
 			"books.name": name,
 			pattern: query,
@@ -402,32 +395,23 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			throw new Error(
-				`Unable to reach Kiwix while searching name="${name}" for query="${query}" at ${url}. ` +
+				`Unable to reach Kiwix while searching for query="${query}" at ${url}. ` +
 				`Check the configured Kiwix Endpoint and confirm the server is running. Cause: ${message}`
 			);
 		}
 		if (!resp.ok) {
-			const body = await resp.text().catch(() => "");
-			if (resp.status === 400) {
-				throw new Error(
-					`Kiwix rejected the search (HTTP 400) for name="${name}" and query="${query}". ` +
-					`The name must be the exact machine-readable name from wiki_list, not a display title such as "Baseball". ` +
-					`Call wiki_list again and copy its name field into wiki_search.`
-				);
-			}
-
-			const responseSummary = summarizeResponseBody(body);
-			throw new Error(
-				`Kiwix returned HTTP ${resp.status} while searching name="${name}" for query="${query}" ` +
-				`at ${resp.url || url}.${responseSummary ? ` Response: ${responseSummary}` : ""}`
-			);
+			return {
+				results: [],
+				error: `Kiwix search returned HTTP ${resp.status} for this query.`,
+				hint: "Shorten or rephrase the query, then try wiki_search again.",
+			};
 		}
 		if (!suggestionResp.ok) {
 			const body = await suggestionResp.text().catch(() => "");
 			const responseSummary = summarizeResponseBody(body);
 			throw new Error(
 				`Kiwix returned HTTP ${suggestionResp.status} while finding an exact or prefix title match ` +
-				`for name="${name}" and query="${query}" at ${suggestionResp.url || suggestionUrl}.` +
+				`for query="${query}" at ${suggestionResp.url || suggestionUrl}.` +
 				`${responseSummary ? ` Response: ${responseSummary}` : ""}`
 			);
 		}
@@ -501,10 +485,9 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 	const wikiFetchTool = tool({
 		name: "wiki_fetch",
 		description: text`
-		Fetch and return parts of an article.
+		Fetch parts of a local Wikipedia article selected from wiki_search results.
 		Parameters:
-		- name (required): exact book name from your 'wiki_list' tool call.
-		- path (required): exact article path from your 'wiki_search' tool call for the same book.
+		- path (required): exact article path returned by wiki_search. Do not use the article title.
 		- content (optional, defaults to 'intro'): which part of the article to fetch:
 			'intro': Returns only the introduction section. Use this as DEFAULT for casual inquiries.
 			'full': Returns the complete article, but excluding the 'References' section.
@@ -518,23 +501,19 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 		- page (optional, defaults to 1): 1-based page number. Use pagination.hasNextPage to determine whether to fetch another page.
 		`,
 	parameters: {
-		name: z
-			.string()
-			.trim()
-			.min(1, "name is required; call wiki_list and use its exact name field")
-			.describe("Exact book name returned by wiki_list"),
 		path: z
 			.string()
 			.trim()
 			.min(1, "path is required; call wiki_search and use its exact path field")
-			.describe("Exact article path returned by wiki_search for the same book"),
+			.describe("Exact article path returned by wiki_search"),
 		content: z
 		.enum(["intro", "full", "refs"])
 		.default("intro")
 		.describe("Article content to fetch"),
 		page: z.number().int().min(1).default(1).describe("1-based page number"),
 	},
-	implementation: async ({ name, path, content, page }) => {
+	implementation: async ({ path, content, page }) => {
+		const name = await getBookName();
 		const articlePath = path.split("#")[0];
 		const initialUrl = new URL(`/content/${name}/${articlePath}`, baseUrl).toString();
 		const initialFragment = path.includes("#") ? path.split("#")[1] : null;
@@ -546,22 +525,21 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 			if (error instanceof HttpError) {
 				if (error.status === 404) {
 					throw new Error(
-						`Article not found (HTTP 404) for name="${name}" and path="${articlePath}". ` +
-						`No required argument is missing; page is optional and defaults to 1. ` +
-						`Call wiki_list to verify the name, then call wiki_search with that same name and copy its exact path into wiki_fetch.`
+						`Article not found (HTTP 404) for path="${articlePath}". ` +
+						`Call wiki_search and copy an exact result path into wiki_fetch.`
 					);
 				}
 
 				const responseSummary = summarizeResponseBody(error.responseBody);
 				throw new Error(
-					`Kiwix returned HTTP ${error.status} while fetching name="${name}" and path="${articlePath}" ` +
+					`Kiwix returned HTTP ${error.status} while fetching path="${articlePath}" ` +
 					`from ${error.url}.${responseSummary ? ` Response: ${responseSummary}` : ""}`
 				);
 			}
 
 			const message = error instanceof Error ? error.message : String(error);
 			throw new Error(
-				`Unable to reach Kiwix while fetching name="${name}" and path="${articlePath}" from ${initialUrl}. ` +
+				`Unable to reach Kiwix while fetching path="${articlePath}" from ${initialUrl}. ` +
 				`Check the configured Kiwix Endpoint and confirm the server is running. Cause: ${message}`
 			);
 		}
@@ -670,5 +648,5 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 	},
 	});
 
-	return [wikiListTool, wikiSearchTool, wikiFetchTool];
+	return [wikiSearchTool, wikiFetchTool];
 }
