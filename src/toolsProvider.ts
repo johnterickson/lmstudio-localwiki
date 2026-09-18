@@ -1,13 +1,14 @@
 import { text, tool, ToolsProviderController } from "@lmstudio/sdk";
 import { z } from "zod";
 import * as cheerio from "cheerio";
+import type { AnyNode, Element } from "domhandler";
 import fetch from "node-fetch";
 import { configSchematics } from "./config";
 
 const normalizeWhitespace = (s: string) => s.replace(/\s+/g, " ").trim();
 
 function extractText(
-	$el: cheerio.Cheerio,
+	$el: cheerio.Cheerio<AnyNode>,
 	$: cheerio.CheerioAPI,
 	options: { removeSup?: boolean; externalLinksAsUrl?: boolean } = {}
 ): string {
@@ -16,7 +17,7 @@ function extractText(
 		if (node.type === "text") {
 			result += $(node).text();
 		} else if (node.type === "tag") {
-			const tag = (node as cheerio.TagElement).tagName?.toLowerCase();
+			const tag = (node as Element).tagName?.toLowerCase();
 			if (tag === "sup" && options.removeSup) {
 				return;
 			}
@@ -39,7 +40,7 @@ function extractText(
 function findSection(
 	$: cheerio.CheerioAPI,
 	headingText: string
-): { $section: cheerio.Cheerio; siblings: cheerio.Cheerio[] } | null {
+): { $section: cheerio.Cheerio<AnyNode>; siblings: cheerio.Cheerio<AnyNode>[] } | null {
 	const $heading = $("h1, h2, h3, h4, h5, h6")
 	.filter((_, el) => $(el).text().trim().toLowerCase() === headingText)
 	.first();
@@ -50,8 +51,10 @@ function findSection(
 		$section = $heading.parent();
 	}
 
-	const level = parseInt($heading.prop("tagName").substring(1));
-	const siblings: cheerio.Cheerio[] = [];
+	const headingTag = $heading.prop("tagName");
+	if (!headingTag) return null;
+	const level = parseInt(headingTag.substring(1));
+	const siblings: cheerio.Cheerio<AnyNode>[] = [];
 	let $next = $section.next();
 
 	while ($next.length) {
@@ -61,8 +64,9 @@ function findSection(
 			if (nextLevel <= level) break;
 		} else if ($next.is("div.mw-heading")) {
 			const innerH = $next.find("h1, h2, h3, h4, h5, h6").first();
-			if (innerH.length) {
-				const nextLevel = parseInt(innerH.prop("tagName").substring(1));
+			const innerTag = innerH.prop("tagName");
+			if (innerTag) {
+				const nextLevel = parseInt(innerTag.substring(1));
 				if (nextLevel <= level) break;
 			}
 		}
@@ -71,32 +75,6 @@ function findSection(
 	}
 
 	return { $section, siblings };
-}
-
-function extractReferencesArray($: cheerio.CheerioAPI): string[] {
-	const section = findSection($, "references");
-	if (!section) return [];
-
-	const sectionHtml = section.siblings.map(el => $.html(el)).join("");
-	if (!sectionHtml) return [];
-
-	const $sec = cheerio.load(`<div>${sectionHtml}</div>`);
-	const $lists = $sec("ol.references").length
-	? $sec("ol.references")
-	: $sec("ol");
-	if (!$lists.length) return [];
-
-	const lines: string[] = [];
-	$lists.find("li").each((_, li) => {
-		const $li = $sec(li).clone();
-		$li.find(".mw-cite-backlink").remove();
-		const line = extractText($li, $sec, {
-			removeSup: false,
-			externalLinksAsUrl: true,
-		});
-		lines.push(normalizeWhitespace(line));
-	});
-	return lines;
 }
 
 function removeReferencesSection($: cheerio.CheerioAPI): void {
@@ -176,78 +154,7 @@ async function fetchWithRedirects(
 	return { html, finalUrl: currentUrl.split("#")[0], fragment: fragmentFromInput };
 }
 
-function extractSubsectionByFragment(
-	$: cheerio.CheerioAPI,
-	container: cheerio.Cheerio,
-	fragment: string
-): string | null {
-	const headingText = decodeURIComponent(fragment.replace(/_/g, " ")).trim();
-	const $heading = container
-	.find("h1, h2, h3, h4, h5, h6")
-	.filter((_, el) => $(el).text().trim().toLowerCase() === headingText.toLowerCase())
-	.first();
-	if (!$heading.length) return null;
-
-	let $section = $heading;
-	if ($heading.parent().hasClass("mw-heading")) {
-		$section = $heading.parent();
-	}
-
-	const level = parseInt($heading.prop("tagName").substring(1));
-	const output: string[] = [];
-
-	output.push($heading.text().trim());
-
-	let $next = $section.next();
-	while ($next.length) {
-		const tagName = $next.prop("tagName")?.toLowerCase();
-		if (tagName && /^h[1-6]$/.test(tagName)) {
-			const nextLevel = parseInt(tagName.substring(1));
-			if (nextLevel <= level) break;
-		} else if ($next.is("div.mw-heading")) {
-			const innerH = $next.find("h1, h2, h3, h4, h5, h6").first();
-			if (innerH.length) {
-				const nextLevel = parseInt(innerH.prop("tagName").substring(1));
-				if (nextLevel <= level) break;
-			}
-		}
-
-		const tag = tagName;
-		if (!tag) {
-			$next = $next.next();
-			continue;
-		}
-		if (["table", "figure", "style", "script"].includes(tag)) {
-			$next = $next.next();
-			continue;
-		}
-
-		if (tag === "p") {
-			const text = normalizeWhitespace(
-				extractText($next, $, { removeSup: true, externalLinksAsUrl: true })
-			);
-			if (text) output.push(text);
-		} else if (tag === "ul" || tag === "ol") {
-			const isOrdered = tag === "ol";
-			$next.children("li").each((_, li) => {
-				const liText = normalizeWhitespace(
-					extractText($(li), $, { removeSup: true, externalLinksAsUrl: true })
-				);
-				output.push(`${isOrdered ? "1." : "-"} ${liText}`);
-			});
-		} else {
-			const text = normalizeWhitespace(
-				extractText($next, $, { removeSup: true, externalLinksAsUrl: true })
-			);
-			if (text) output.push(text);
-		}
-		$next = $next.next();
-	}
-
-	return output.join("\n\n");
-}
-
-function tableToMarkdown($table: cheerio.Cheerio, $: cheerio.CheerioAPI): string {
+function tableToMarkdown($table: cheerio.Cheerio<AnyNode>, $: cheerio.CheerioAPI): string {
 	const rows: string[][] = [];
 	let maxCols = 0;
 	let hasHeader = false;
@@ -290,48 +197,155 @@ function tableToMarkdown($table: cheerio.Cheerio, $: cheerio.CheerioAPI): string
 	return lines.join("\n");
 }
 
+type ArticleBlock = {
+	text: string;
+	tableHeader?: string[];
+	tableRows?: string[];
+};
+
+type ArticleSection = {
+	id: string;
+	title: string;
+	level: number;
+	blocks: ArticleBlock[];
+};
+
+function headingDetails($el: cheerio.Cheerio<AnyNode>): Omit<ArticleSection, "blocks"> | null {
+	const $heading = $el.is("h1, h2, h3, h4, h5, h6")
+		? $el
+		: $el.is("div.mw-heading")
+			? $el.find("h1, h2, h3, h4, h5, h6").first()
+			: null;
+	if (!$heading?.length) return null;
+
+	const tagName = $heading.prop("tagName")?.toLowerCase();
+	if (!tagName) return null;
+	const title = normalizeWhitespace($heading.clone().find(".mw-editsection").remove().end().text());
+	return {
+		id: $heading.attr("id") || $heading.find("[id]").first().attr("id") || title,
+		title,
+		level: Number(tagName.slice(1)),
+	};
+}
+
+function elementToBlocks(
+	$el: cheerio.Cheerio<AnyNode>,
+	$: cheerio.CheerioAPI
+): ArticleBlock[] {
+	const tag = $el.prop("tagName")?.toLowerCase();
+	if (!tag || ["figure", "style", "script"].includes(tag)) return [];
+
+	const heading = headingDetails($el);
+	if (heading) return [];
+
+	if (tag === "p") {
+		const paragraph = normalizeWhitespace(
+			extractText($el, $, { removeSup: false, externalLinksAsUrl: true })
+		);
+		return paragraph ? [{ text: paragraph }] : [];
+	}
+
+	if (tag === "ul" || tag === "ol") {
+		const marker = tag === "ol" ? "1." : "-";
+		const items: ArticleBlock[] = [];
+		$el.children("li").each((_, li) => {
+			const item = normalizeWhitespace(
+				extractText($(li), $, { removeSup: false, externalLinksAsUrl: true })
+			);
+			if (item) items.push({ text: `${marker} ${item}` });
+		});
+		return items;
+	}
+
+	if (tag === "table") {
+		const markdown = tableToMarkdown($el, $);
+		if (!markdown) return [];
+		const lines = markdown.split("\n");
+		const hasHeader = lines.length > 1 && /^\|(?:\s*---\s*\|)+$/.test(lines[1]);
+		return [{
+			text: markdown,
+			tableHeader: hasHeader ? lines.slice(0, 2) : undefined,
+			tableRows: hasHeader ? lines.slice(2) : lines,
+		}];
+	}
+
+	const content = normalizeWhitespace(
+		extractText($el, $, { removeSup: false, externalLinksAsUrl: true })
+	);
+	return content ? [{ text: content }] : [];
+}
+
+function parseArticle($: cheerio.CheerioAPI): ArticleSection[] {
+	const container = $(".mw-parser-output").first();
+	if (!container.length) return [];
+
+	const sections: ArticleSection[] = [{ id: "lead", title: "Lead", level: 1, blocks: [] }];
+	let currentSection = sections[0];
+	container.children().each((_, element) => {
+		const $element = $(element);
+		const heading = headingDetails($element);
+		if (heading) {
+			currentSection = { ...heading, blocks: [] };
+			sections.push(currentSection);
+		}
+		currentSection.blocks.push(...elementToBlocks($element, $));
+	});
+	return sections.filter(section => section.blocks.length > 0);
+}
+
+function splitTableBlock(block: ArticleBlock, limit: number): string[] {
+	if (!block.tableRows || block.text.length <= limit) return [block.text];
+	const header = block.tableHeader ?? [];
+	const segments: string[] = [];
+	let lines = [...header];
+
+	for (const row of block.tableRows) {
+		const candidate = [...lines, row].join("\n");
+		if (lines.length > header.length && candidate.length > limit) {
+			segments.push(lines.join("\n"));
+			lines = [...header, row];
+		} else {
+			lines.push(row);
+		}
+	}
+	if (lines.length > header.length || (header.length === 0 && lines.length > 0)) {
+		segments.push(lines.join("\n"));
+	}
+	return segments;
+}
+
+function segmentBlocks(blocks: ArticleBlock[], limit: number): string[] {
+	if (limit === -1) return [blocks.map(block => block.text).join("\n\n")];
+	const atomicBlocks = blocks.flatMap(block => splitTableBlock(block, limit));
+	const segments: string[] = [];
+	let current = "";
+
+	for (const block of atomicBlocks) {
+		const candidate = current ? `${current}\n\n${block}` : block;
+		if (current && candidate.length > limit) {
+			segments.push(current);
+			current = block;
+		} else {
+			current = candidate;
+		}
+	}
+	if (current || segments.length === 0) segments.push(current);
+	return segments;
+}
+
 export async function toolsProvider(ctl: ToolsProviderController) {
 	const config = ctl.getPluginConfig(configSchematics);
 	const baseUrl = config.get("kiwixBaseUrl");
 	const searchLimit = config.get("searchLimit");
 	const searchSummaryEnabled = config.get("searchSummary");
 	const charLimit = config.get("charLimit");
+	let bookNamePromise: Promise<string> | undefined;
+	if (charLimit === 0 || charLimit < -1) {
+		throw new Error("Character limit must be -1 or a positive integer");
+	}
 
-	const paginate = (content: string, page: number) => {
-		if (charLimit === 0 || charLimit < -1) {
-			throw new Error("Character limit must be -1 or a positive integer");
-		}
-
-		const pageSize = charLimit === -1 ? Math.max(content.length, 1) : charLimit;
-		const totalPages = Math.max(1, Math.ceil(content.length / pageSize));
-		if (page > totalPages) {
-			throw new Error(`Page ${page} is out of range (total pages: ${totalPages})`);
-		}
-
-		const start = (page - 1) * pageSize;
-		return {
-			content: content.slice(start, start + pageSize),
-			pagination: {
-				page,
-				pageSize: charLimit === -1 ? null : pageSize,
-				totalPages,
-				totalCharacters: content.length,
-				hasPreviousPage: page > 1,
-				hasNextPage: page < totalPages,
-			},
-		};
-	};
-
-	const wikiListTool = tool({
-		name: "wiki_list",
-		description: text`
-		Lists all available books.
-		You MUST invoke this tool first to get the book names for your other tool calls.
-		Use the the 'name' field (NOT 'title') for other tools.
-		If you can't find relevant results in one book, try another.
-		`,
-		parameters: {},
-		implementation: async () => {
+	const getBookName = () => {
+		bookNamePromise ??= (async () => {
 			const url = new URL("/catalog/v2/entries?count=-1", baseUrl).toString();
 			const resp = await fetch(url);
 			if (!resp.ok) {
@@ -340,49 +354,19 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 			}
 			const xmlText = await resp.text();
 			const $ = cheerio.load(xmlText, { xmlMode: true });
+			const entry = $("entry").first();
+			const linkHref = entry.find('link[type="text/html"]').attr("href")?.trim();
+			const name = linkHref ? linkHref.replace(/^\/content\//, "") : "";
+			if (!name) {
+				throw new Error("Kiwix catalog does not contain a usable book");
+			}
+			return name;
+		})();
+		return bookNamePromise;
+	};
 
-			const entries: Array<{ title: string; summary: string; name: string }> = [];
-			$("entry").each((_, entry) => {
-				const title = $(entry).find("title").text().trim();
-				const summary = $(entry).find("summary").text().trim();
-				const linkHref = $(entry)
-				.find('link[type="text/html"]')
-				.attr("href")
-				?.trim();
-				const name = linkHref ? linkHref.replace(/^\/content\//, "") : "";
-				if (title && name) {
-					entries.push({ title, summary, name });
-				}
-			});
-			return entries;
-		},
-	});
-
-	const wikiSearchTool = tool({
-		name: "wiki_search",
-		description: text`
-		Search within a specific book for articles. Returns the first exact or prefix title match first,
-		followed by full-text matches, with duplicate paths removed.
-		Parameters:
-		- name (required): exact machine-readable 'name' from your 'wiki_list' tool call, NOT its display 'title'.
-		- query (required): search term.
-		Returns relevant articles with 'title' and 'path'.
-		There could be an extra 'summary' section if the user enables it.
-		Use the 'path' field (NOT 'title') in 'wiki_fetch' tool to retrieve the article.
-		`,
-	parameters: {
-		name: z
-			.string()
-			.trim()
-			.min(1, "name is required; call wiki_list and use its exact name field, not title")
-			.describe("Exact machine-readable book name returned by wiki_list, not its title"),
-		query: z
-			.string()
-			.trim()
-			.min(1, "query is required and cannot be empty")
-			.describe("Non-empty article search term"),
-	},
-	implementation: async ({ name, query }) => {
+	const searchArticles = async (query: string) => {
+		const name = await getBookName();
 		const params = new URLSearchParams({
 			"books.name": name,
 			pattern: query,
@@ -408,14 +392,6 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 		}
 		if (!resp.ok) {
 			const body = await resp.text().catch(() => "");
-			if (resp.status === 400) {
-				throw new Error(
-					`Kiwix rejected the search (HTTP 400) for name="${name}" and query="${query}". ` +
-					`The name must be the exact machine-readable name from wiki_list, not a display title such as "Baseball". ` +
-					`Call wiki_list again and copy its name field into wiki_search.`
-				);
-			}
-
 			const responseSummary = summarizeResponseBody(body);
 			throw new Error(
 				`Kiwix returned HTTP ${resp.status} while searching name="${name}" for query="${query}" ` +
@@ -495,70 +471,25 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 			results: mergedResults.slice(0, searchLimit),
 			hint: text`If the results are irrelevant or empty, try shortening the search query.`
 		};
-	},
-	});
+	};
 
-	const wikiFetchTool = tool({
-		name: "wiki_fetch",
-		description: text`
-		Fetch and return parts of an article.
-		Parameters:
-		- name (required): exact book name from your 'wiki_list' tool call.
-		- path (required): exact article path from your 'wiki_search' tool call for the same book.
-		- content (optional, defaults to 'intro'): which part of the article to fetch:
-			'intro': Returns only the introduction section. Use this as DEFAULT for casual inquiries.
-			'full': Returns the complete article, but excluding the 'References' section.
-				Citation marks are in square brackets, such as [1].
-				If you need links to those citations, use 'refs' mode to fetch them.
-				External links are shown as '<URL>'.
-				Use this if the user wants detailed information or want to dive deep into a topic.
-			'refs': Returns only the 'References' section as a numbered list.
-				External links are shown as '<URL>'.
-				Use this only when you need external links, or the user asks for references/sources.
-		- page (optional, defaults to 1): 1-based page number. Use pagination.hasNextPage to determine whether to fetch another page.
-		`,
-	parameters: {
-		name: z
-			.string()
-			.trim()
-			.min(1, "name is required; call wiki_list and use its exact name field")
-			.describe("Exact book name returned by wiki_list"),
-		path: z
-			.string()
-			.trim()
-			.min(1, "path is required; call wiki_search and use its exact path field")
-			.describe("Exact article path returned by wiki_search for the same book"),
-		content: z
-		.enum(["intro", "full", "refs"])
-		.default("intro")
-		.describe("Article content to fetch"),
-		page: z.number().int().min(1).default(1).describe("1-based page number"),
-	},
-	implementation: async ({ name, path, content, page }) => {
+	const loadArticleSections = async (path: string) => {
+		const name = await getBookName();
 		const articlePath = path.split("#")[0];
 		const initialUrl = new URL(`/content/${name}/${articlePath}`, baseUrl).toString();
-		const initialFragment = path.includes("#") ? path.split("#")[1] : null;
+		let result: Awaited<ReturnType<typeof fetchWithRedirects>>;
 
-		let fetchResult: Awaited<ReturnType<typeof fetchWithRedirects>>;
 		try {
-			fetchResult = await fetchWithRedirects(initialUrl);
+			result = await fetchWithRedirects(initialUrl);
 		} catch (error) {
 			if (error instanceof HttpError) {
-				if (error.status === 404) {
-					throw new Error(
-						`Article not found (HTTP 404) for name="${name}" and path="${articlePath}". ` +
-						`No required argument is missing; page is optional and defaults to 1. ` +
-						`Call wiki_list to verify the name, then call wiki_search with that same name and copy its exact path into wiki_fetch.`
-					);
-				}
-
+				if (error.status === 404) return null;
 				const responseSummary = summarizeResponseBody(error.responseBody);
 				throw new Error(
 					`Kiwix returned HTTP ${error.status} while fetching name="${name}" and path="${articlePath}" ` +
 					`from ${error.url}.${responseSummary ? ` Response: ${responseSummary}` : ""}`
 				);
 			}
-
 			const message = error instanceof Error ? error.message : String(error);
 			throw new Error(
 				`Unable to reach Kiwix while fetching name="${name}" and path="${articlePath}" from ${initialUrl}. ` +
@@ -566,109 +497,99 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 			);
 		}
 
-		const { html, finalUrl, fragment: redirectFragment } = fetchResult;
-		const $ = cheerio.load(html);
-		const container = $(".mw-parser-output");
-		if (!container.length) {
-			throw new Error(`Article content not found after following redirects (final URL: ${finalUrl})`);
+		const $ = cheerio.load(result.html);
+		if (!$(`.mw-parser-output`).length) {
+			throw new Error(`Article content not found after following redirects (final URL: ${result.finalUrl})`);
 		}
+		removeReferencesSection($);
+		return parseArticle($);
+	};
 
-		const effectiveFragment = initialFragment ?? redirectFragment;
+	const wikiSearchTool = tool({
+		name: "wiki_search",
+		description: text`
+		Search the local Wikipedia book for articles. Returns the first exact or prefix title match first,
+		followed by full-text matches, with duplicate paths removed.
+		Parameters:
+		- query (required): search term.
+		Returns relevant articles with 'title' and 'path'.
+		There could be an extra 'summary' section if the user enables it.
+		Use the 'path' field (NOT 'title') in 'wiki_fetch' tool to retrieve the article.
+		`,
+	parameters: {
+		query: z
+			.string()
+			.trim()
+			.min(1, "query is required and cannot be empty")
+			.describe("Non-empty article search term"),
+	},
+	implementation: async ({ query }) => searchArticles(query),
+	});
 
-		if (content === "intro") {
-			if (effectiveFragment) {
-				const subsectionContent = extractSubsectionByFragment($, container, effectiveFragment);
-				if (subsectionContent) {
-					return paginate(subsectionContent, page);
-				}
-			}
+	const wikiSectionsTool = tool({
+		name: "wiki_sections",
+		description: text`
+		List an article's sections before fetching content.
+		Parameters:
+		- path (required): exact article path from wiki_search.
+		Returns concise section IDs and titles for wiki_fetch.
+		`,
+		parameters: {
+			path: z.string().trim().min(1, "path is required").describe("Exact article path from wiki_search"),
+		},
+		implementation: async ({ path }) => {
+			const sections = await loadArticleSections(path);
+			if (!sections) return searchArticles(path.replace(/_/g, " "));
+			return {
+				sections: sections.map(section => ({
+					id: section.id,
+					title: section.title,
+					level: section.level,
+				})),
+			};
+		},
+	});
 
-			const firstHeading = container.find("h1, h2, h3, h4, h5, h6").first();
-			const paragraphs: string[] = [];
+	const wikiFetchTool = tool({
+		name: "wiki_fetch",
+		description: text`
+		Fetch one intelligently segmented article section, excluding References.
+		Parameters:
+		- path (required): exact article path from wiki_search.
+		- section (required): exact section ID from wiki_sections.
+		- segment (optional, defaults to 1): 1-based segment. Segments preserve complete Markdown blocks and table rows.
+		`,
+	parameters: {
+		path: z
+			.string()
+			.trim()
+			.min(1, "path is required; call wiki_search and use its exact path field")
+			.describe("Exact article path returned by wiki_search for the same book"),
+		section: z.string().trim().min(1, "section is required; call wiki_sections first"),
+		segment: z.number().int().min(1).default(1).describe("1-based section segment number"),
+	},
+	implementation: async ({ path, section, segment }) => {
+		const sections = await loadArticleSections(path);
+		if (!sections) return searchArticles(path.replace(/_/g, " "));
+		const selected = sections.find(candidate => candidate.id === section);
+		if (!selected) throw new Error(`Unknown section ID: ${section}`);
 
-			if (firstHeading.length) {
-				let headingBlock = firstHeading;
-				if (firstHeading.parent().hasClass("mw-heading")) {
-					headingBlock = firstHeading.parent();
-				}
-				headingBlock.prevAll("p").each((_, p) => {
-					paragraphs.push(
-						normalizeWhitespace(
-							extractText($(p), $, { removeSup: true, externalLinksAsUrl: true })
-						)
-					);
-				});
-				paragraphs.reverse();
-			} else {
-				container.find("p").each((_, p) => {
-					paragraphs.push(
-						normalizeWhitespace(
-							extractText($(p), $, { removeSup: true, externalLinksAsUrl: true })
-						)
-					);
-				});
-			}
-
-			const result = paragraphs.filter(Boolean).join("\n\n");
-			return paginate(result, page);
+		const segments = segmentBlocks(selected.blocks, charLimit);
+		if (segment > segments.length) {
+			throw new Error(`Segment ${segment} is out of range (total segments: ${segments.length})`);
 		}
-
-		if (content === "refs") {
-			const refLines = extractReferencesArray($);
-			if (refLines.length === 0) {
-				return paginate("No references section found.", page);
-			}
-			const numbered = refLines.map((line, idx) => `${idx + 1}. ${line}`);
-			const result = numbered.join("\n\n");
-			return paginate(result, page);
-		}
-
-		const containerHtml = container.clone().html() ?? "";
-		const $clone = cheerio.load(`<div>${containerHtml}</div>`);
-		const cloneContainer = $clone("div").first();
-		if (!cloneContainer.length) throw new Error("Article content not found");
-		removeReferencesSection($clone);
-
-		const output: string[] = [];
-		cloneContainer.children().each((_, el) => {
-			const $el = $clone(el);
-			const tag = (el as cheerio.TagElement).tagName?.toLowerCase();
-			if (!tag) return;
-			if (["figure", "style", "script"].includes(tag)) return;
-
-			if (/^h[1-6]$/.test(tag)) {
-				output.push($el.text().trim());
-			} else if (tag === "p") {
-				const text = normalizeWhitespace(
-					extractText($el, $clone, { removeSup: false, externalLinksAsUrl: true })
-				);
-				if (text) output.push(text);
-			} else if (tag === "ul" || tag === "ol") {
-				const isOrdered = tag === "ol";
-				$el.children("li").each((_, li) => {
-					const liText = normalizeWhitespace(
-						extractText($clone(li), $clone, {
-							removeSup: false,
-							externalLinksAsUrl: true,
-						})
-					);
-					output.push(`${isOrdered ? "1." : "-"} ${liText}`);
-				});
-			} else if (tag === "table") {
-				const tableMarkdown = tableToMarkdown($el, $clone);
-				if (tableMarkdown) output.push(tableMarkdown);
-			} else {
-				const t = normalizeWhitespace(
-					extractText($el, $clone, { removeSup: false, externalLinksAsUrl: true })
-				);
-				if (t) output.push(t);
-			}
-		});
-
-		const fullResult = output.join("\n\n").trim();
-		return paginate(fullResult, page);
+		return {
+			content: segments[segment - 1],
+			section: { id: selected.id, title: selected.title },
+			pagination: {
+				segment,
+				totalSegments: segments.length,
+				hasPreviousSegment: segment > 1,
+				hasNextSegment: segment < segments.length,
+			},
+		};
 	},
 	});
 
-	return [wikiListTool, wikiSearchTool, wikiFetchTool];
+	return [wikiSearchTool, wikiSectionsTool, wikiFetchTool];
 }

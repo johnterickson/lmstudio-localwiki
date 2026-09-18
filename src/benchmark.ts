@@ -84,7 +84,7 @@ async function main() {
       {
         role: "system",
         content:
-          "Answer using the provided local Wikipedia tools. Call wiki_list first, then search and fetch an article before answering. Find explicit support rather than inferring from an incomplete list. Do not rely on other tools or web search. Be concise.",
+          "Your internal factual knowledge is limited and may be inaccurate, but you have access to an offline copy of Wikipedia through the provided tools. This is your primary source of truth: use it heavily, and do not rely on memory, other tools, or web search.\n\nGPU reasoning is expensive, but tool calls are cheap. Prefer making additional searches and fetches over guessing or prolonged deliberation. Read as many pages of relevant articles as needed. Do not overthink or second-guess straightforward information requests; extract the facts directly from Wikipedia.\n\nFind explicit support for the precise question, preserving its qualifiers and relationships. Once the evidence is sufficient, answer concisely.",
       },
       { role: "user", content: question },
     ],

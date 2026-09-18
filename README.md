@@ -5,12 +5,24 @@ Supercharge your LLM's knowledge base with self-hosted, fully offline wiki artic
 ## Features
 
 *   **Expandable & Upgradable**: Expanding and updating your Kiwix library are made trivial with openZIM files.
-*   **Fast**: For casual inquiries, this tool defaults to `intro` mode when fetching an article, which allows you LLM to provide quick yet factual responses. If the LLM needs more context, it will call the tool in either `full` or `refs` mode to get the full article or the references section. Additionally, this tool uses `cheerio` to strip away unnecessary HTML elements, significantly reducing prompt processing times.
+*   **Intentional Retrieval**: Search for an article, list its sections, then fetch only the relevant section.
+*   **Structured Segments**: Article text is cleaned with `cheerio` and returned without the References section. Segments preserve Markdown blocks; tables split only between rows and repeat their headers.
+*   **Forgiving Paths**: If an article path returns HTTP 404, underscores are converted to spaces and the value is passed to `wiki_search`; its search results are returned to the model.
 *   **Low Overhead**: Unlike RAG-based semantic search, this tool does not require a vector database. It interacts directly with your self-hosted Kiwix endpoint via its `OPDS API`. Since the vast majority of the content resides on disk, this minimal overhead makes it possible to implement on SBCs / mobile devices.
 
 ## Limitations
 
 *   Currently does not support images.
+
+## Tools
+
+```text
+wiki_search(query)
+wiki_sections(path)
+wiki_fetch(path, section, segment = 1)
+```
+
+`wiki_sections` returns non-empty sections in Wikipedia document order. `wiki_fetch` returns native Markdown and segment metadata. Exact article paths and section IDs are required at this service boundary; callers may layer shorter request-scoped handles over them.
 
 ## Installation & Configuration
 

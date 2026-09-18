@@ -40,8 +40,8 @@ export const configSchematics = createConfigSchematics()
     "charLimit",
     "numeric",
     {
-      displayName: "Characters Per Page",
-      subtitle: "Limits the number of characters (NOT tokens) returned on each wiki_fetch page (-1 = no pagination).",
+      displayName: "Characters Per Segment",
+      subtitle: "Target character limit for each wiki_fetch segment (-1 = no segmentation). Tables split only between rows.",
       min: -1,
       max: Number.MAX_SAFE_INTEGER,
       int: true,
