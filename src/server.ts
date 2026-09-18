@@ -9,7 +9,7 @@ const authToken = process.env.LOCALWIKI_MCP_AUTH_TOKEN ?? "";
 const values: Record<string, string | number | boolean> = {
 	kiwixBaseUrl: process.env.KIWIX_BASE_URL ?? "http://kiwix:8080",
 	searchSummary: process.env.SEARCH_SUMMARY === "true",
-	searchLimit: Number(process.env.SEARCH_LIMIT ?? "5"),
+	searchLimit: Number(process.env.SEARCH_LIMIT ?? "25"),
 	charLimit: Number(process.env.CHAR_LIMIT ?? "4000"),
 };
 
