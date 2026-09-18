@@ -258,6 +258,17 @@ function elementToBlocks(
 	}
 
 	if (tag === "table") {
+		const nestedTables = $el.find("table").filter((_, table) =>
+			$(table).parents("table").first().is($el)
+		);
+		if (nestedTables.length) {
+			const blocks: ArticleBlock[] = [];
+			nestedTables.each((_, table) => {
+				blocks.push(...elementToBlocks($(table), $));
+			});
+			return blocks;
+		}
+
 		const markdown = tableToMarkdown($el, $);
 		if (!markdown) return [];
 		const lines = markdown.split("\n");
@@ -267,6 +278,14 @@ function elementToBlocks(
 			tableHeader: hasHeader ? lines.slice(0, 2) : undefined,
 			tableRows: hasHeader ? lines.slice(2) : lines,
 		}];
+	}
+
+	if (tag === "div") {
+		const blocks: ArticleBlock[] = [];
+		$el.children().each((_, child) => {
+			blocks.push(...elementToBlocks($(child), $));
+		});
+		if (blocks.length) return blocks;
 	}
 
 	const content = normalizeWhitespace(
