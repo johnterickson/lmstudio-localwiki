@@ -352,6 +352,50 @@ function segmentBlocks(blocks: ArticleBlock[], limit: number): string[] {
 	return segments;
 }
 
+function normalizeToolArguments(value: unknown): unknown {
+	if (Array.isArray(value)) return value.map(normalizeToolArguments);
+	if (value === null || typeof value !== "object") return value;
+	return Object.fromEntries(
+		Object.entries(value as Record<string, unknown>)
+			.sort(([left], [right]) => left.localeCompare(right))
+			.map(([key, entry]) => [key, normalizeToolArguments(entry)])
+	);
+}
+
+const normalizeSectionKey = (value: string) =>
+	normalizeWhitespace(value).replace(/ /g, "_").toLocaleLowerCase("en-US");
+
+function editDistance(left: string, right: string): number {
+	let previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+	for (let leftIndex = 1; leftIndex <= left.length; leftIndex++) {
+		const current = [leftIndex];
+		for (let rightIndex = 1; rightIndex <= right.length; rightIndex++) {
+			const substitutionCost = left[leftIndex - 1] === right[rightIndex - 1] ? 0 : 1;
+			current[rightIndex] = Math.min(
+				current[rightIndex - 1] + 1,
+				previous[rightIndex] + 1,
+				previous[rightIndex - 1] + substitutionCost
+			);
+		}
+		previous = current;
+	}
+	return previous[right.length];
+}
+
+function nearestSectionId(section: string, sections: ArticleSection[]): string | undefined {
+	const sectionKey = normalizeSectionKey(section);
+	const nearest = sections.reduce<{ id: string; distance: number } | undefined>((nearest, candidate) => {
+		const candidateKey = normalizeSectionKey(candidate.id);
+		const distance = Math.min(
+			editDistance(sectionKey, candidateKey),
+			...candidateKey.split("_").map(part => editDistance(sectionKey, part))
+		);
+		return !nearest || distance < nearest.distance ? { id: candidate.id, distance } : nearest;
+	}, undefined);
+	const maxDistance = Math.max(2, Math.floor(sectionKey.length * 0.4));
+	return nearest && nearest.distance <= maxDistance ? nearest.id : undefined;
+}
+
 export async function toolsProvider(ctl: ToolsProviderController) {
 	const config = ctl.getPluginConfig(configSchematics);
 	const baseUrl = config.get("kiwixBaseUrl");
@@ -359,9 +403,34 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 	const searchSummaryEnabled = config.get("searchSummary");
 	const charLimit = config.get("charLimit");
 	let bookNamePromise: Promise<string> | undefined;
+	const attemptedToolCalls = new Map<string, number>();
+	const maxTrackedToolCalls = 128;
 	if (charLimit === 0 || charLimit < -1) {
 		throw new Error("Character limit must be -1 or a positive integer");
 	}
+
+	const runWithLoopGuard = async <T>(
+		toolName: string,
+		args: Record<string, unknown>,
+		implementation: () => Promise<T>
+	): Promise<T | Record<string, unknown>> => {
+		const normalizedArguments = normalizeToolArguments(args);
+		const callKey = `${toolName}:${JSON.stringify(normalizedArguments)}`;
+		const previousCalls = attemptedToolCalls.get(callKey) ?? 0;
+		if (previousCalls > 0) {
+			attemptedToolCalls.set(callKey, previousCalls + 1);
+			throw new Error(
+				`Repeated identical ${toolName} call. Use the earlier result, or change the arguments.`
+			);
+		}
+
+		if (attemptedToolCalls.size >= maxTrackedToolCalls) {
+			const oldestCallKey = attemptedToolCalls.keys().next().value;
+			if (oldestCallKey !== undefined) attemptedToolCalls.delete(oldestCallKey);
+		}
+		attemptedToolCalls.set(callKey, 1);
+		return implementation();
+	};
 
 	const getBookName = () => {
 		bookNamePromise ??= (async () => {
@@ -542,7 +611,8 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 			.min(1, "query is required and cannot be empty")
 			.describe("Non-empty article search term"),
 	},
-	implementation: async ({ query }) => searchArticles(query),
+	implementation: async ({ query }) =>
+		runWithLoopGuard("wiki_search", { query }, () => searchArticles(query)),
 	});
 
 	const wikiSectionsTool = tool({
@@ -551,22 +621,21 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 		List an article's sections before fetching content.
 		Parameters:
 		- path (required): exact article path from wiki_search.
-		Returns concise section IDs and titles for wiki_fetch.
+		Returns concise section IDs for wiki_fetch.
 		`,
 		parameters: {
 			path: z.string().trim().min(1, "path is required").describe("Exact article path from wiki_search"),
 		},
-		implementation: async ({ path }) => {
+		implementation: async ({ path }) => runWithLoopGuard("wiki_sections", { path }, async () => {
 			const sections = await loadArticleSections(path);
 			if (!sections) return searchArticles(path.replace(/_/g, " "));
 			return {
 				sections: sections.map(section => ({
 					id: section.id,
-					title: section.title,
 					level: section.level,
 				})),
 			};
-		},
+		}),
 	});
 
 	const wikiFetchTool = tool({
@@ -575,7 +644,7 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 		Fetch one intelligently segmented article section, excluding References.
 		Parameters:
 		- path (required): exact article path from wiki_search.
-		- section (required): exact section ID from wiki_sections.
+		- section (required): section ID from wiki_sections (case-insensitive; spaces may replace underscores).
 		- segment (optional, defaults to 1): 1-based segment. Segments preserve complete Markdown blocks and table rows.
 		`,
 	parameters: {
@@ -584,14 +653,26 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 			.trim()
 			.min(1, "path is required; call wiki_search and use its exact path field")
 			.describe("Exact article path returned by wiki_search for the same book"),
-		section: z.string().trim().min(1, "section is required; call wiki_sections first"),
+		section: z
+			.string()
+			.trim()
+			.min(1, "section is required; call wiki_sections first")
+			.describe("Case-insensitive section ID from wiki_sections; spaces may replace underscores"),
 		segment: z.number().int().min(1).default(1).describe("1-based section segment number"),
 	},
-	implementation: async ({ path, section, segment }) => {
+	implementation: async ({ path, section, segment }) =>
+		runWithLoopGuard("wiki_fetch", { path, section, segment }, async () => {
 		const sections = await loadArticleSections(path);
 		if (!sections) return searchArticles(path.replace(/_/g, " "));
-		const selected = sections.find(candidate => candidate.id === section);
-		if (!selected) throw new Error(`Unknown section ID: ${section}`);
+		const sectionKey = normalizeSectionKey(section);
+		const selected = sections.find(candidate => normalizeSectionKey(candidate.id) === sectionKey);
+		if (!selected) {
+			const suggestion = nearestSectionId(section, sections);
+			throw new Error(
+				`Unknown section ID: ${section}. Call wiki_sections with path="${path}" and use one of its section IDs.` +
+				(suggestion ? ` Did you mean "${suggestion}"?` : "")
+			);
+		}
 
 		const segments = segmentBlocks(selected.blocks, charLimit);
 		if (segment > segments.length) {
@@ -599,7 +680,7 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 		}
 		return {
 			content: segments[segment - 1],
-			section: { id: selected.id, title: selected.title },
+			section: { id: selected.id },
 			pagination: {
 				segment,
 				totalSegments: segments.length,
@@ -607,7 +688,7 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 				hasNextSegment: segment < segments.length,
 			},
 		};
-	},
+	}),
 	});
 
 	return [wikiSearchTool, wikiSectionsTool, wikiFetchTool];
