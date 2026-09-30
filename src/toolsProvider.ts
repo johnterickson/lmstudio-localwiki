@@ -10,7 +10,7 @@ const normalizeWhitespace = (s: string) => s.replace(/\s+/g, " ").trim();
 function extractText(
 	$el: cheerio.Cheerio<AnyNode>,
 	$: cheerio.CheerioAPI,
-	options: { removeSup?: boolean; externalLinksAsUrl?: boolean } = {}
+	options: { removeSup?: boolean; externalLinksAsUrl?: boolean; internalLinksAsMarkdown?: boolean } = {}
 ): string {
 	let result = "";
 	$el.contents().each((_, node) => {
@@ -26,6 +26,9 @@ function extractText(
 				const linkText = $(node).text().trim();
 				if (options.externalLinksAsUrl && /^https?:\/\//i.test(href)) {
 					result += `${linkText} <${href}>`;
+				} else if (options.internalLinksAsMarkdown && href && !/^(?:[a-z][a-z\d+.-]*:|\/|#)/i.test(href)) {
+					const label = linkText.replace(/([\\[\]])/g, "\\$1");
+					result += `[${label}](<${href}>)`;
 				} else {
 					result += linkText;
 				}
@@ -174,7 +177,7 @@ function tableToMarkdown($table: cheerio.Cheerio<AnyNode>, $: cheerio.CheerioAPI
 		$tr.children("th, td").each((_, cell) => {
 			const $cell = $(cell);
 			let cellText = normalizeWhitespace(
-				extractText($cell, $, { removeSup: false, externalLinksAsUrl: true })
+				extractText($cell, $, { removeSup: false, externalLinksAsUrl: true, internalLinksAsMarkdown: true })
 			);
 			cellText = cellText.replace(/\|/g, "\\|");
 			cells.push(cellText);
@@ -249,7 +252,7 @@ function elementToBlocks(
 
 	if (tag === "p") {
 		const paragraph = normalizeWhitespace(
-			extractText($el, $, { removeSup: false, externalLinksAsUrl: true })
+			extractText($el, $, { removeSup: false, externalLinksAsUrl: true, internalLinksAsMarkdown: true })
 		);
 		return paragraph ? [{ text: paragraph }] : [];
 	}
@@ -259,7 +262,7 @@ function elementToBlocks(
 		const items: ArticleBlock[] = [];
 		$el.children("li").each((_, li) => {
 			const item = normalizeWhitespace(
-				extractText($(li), $, { removeSup: false, externalLinksAsUrl: true })
+				extractText($(li), $, { removeSup: false, externalLinksAsUrl: true, internalLinksAsMarkdown: true })
 			);
 			if (item) items.push({ text: `${marker} ${item}` });
 		});
@@ -298,7 +301,7 @@ function elementToBlocks(
 	}
 
 	const content = normalizeWhitespace(
-		extractText($el, $, { removeSup: false, externalLinksAsUrl: true })
+		extractText($el, $, { removeSup: false, externalLinksAsUrl: true, internalLinksAsMarkdown: true })
 	);
 	return content ? [{ text: content }] : [];
 }
@@ -564,8 +567,10 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 
 		return {
 			results: mergedResults.slice(0, searchLimit),
-			...(truncated ? { truncated_query: searchQuery } : {}),
-			hint: text`Search queries are limited to seven words. If the results are irrelevant or empty, retry with fewer, more distinctive words.`
+			...(truncated ? {
+				truncated_query: searchQuery,
+				hint: text`Search queries are limited to seven words. If the results are irrelevant or empty, retry with fewer, more distinctive words.`,
+			} : {}),
 		};
 	};
 
@@ -649,7 +654,7 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 	const wikiFetchTool = tool({
 		name: "wiki_fetch",
 		description: text`
-		Fetch one page from a Wikipedia article, excluding References.
+		Fetch one page from a Wikipedia article as Markdown, excluding References. Internal article links retain their exact paths.
 		Articles contain ordered sections, and each section contains one or more pages.
 		Parameters:
 		- path (required): exact article path from wiki_search.
