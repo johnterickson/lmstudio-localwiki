@@ -80,12 +80,12 @@ wiki_search(query)
 ```
 
 - `query` is a concise article title or search phrase.
-- Results contain article `title` and exact `path` values.
+- Results contain exact `path` values without redundant titles.
 - Exact or prefix title suggestions are merged ahead of full-text matches.
 - Duplicate paths are removed.
 - The default result limit is five.
 - Search summaries are disabled in the benchmark.
-- A returned `path`, not the display title, must be passed to `wiki_sections`.
+- A returned `path` must be passed to `wiki_sections`.
 
 ### `wiki_sections`
 
@@ -109,7 +109,8 @@ wiki_fetch(path, section, segment = 1)
 - `segment` is one-based.
 - The default target segment size is 4,000 characters.
 - Segments preserve complete Markdown blocks. Large tables split only between rows and repeat their headers.
-- Results include segment metadata.
+- Results identify the selected `section` and the `next_section`, which is `null` only at the end of the article.
+- `section_pagination` describes segments within the selected section, not progress through the article.
 
 ### Deliberately Removed Surface Area
 
@@ -267,7 +268,7 @@ Tool: `wiki_search`
 Relevant result:
 
 ```json
-{"title":"Major League Baseball","path":"Major_League_Baseball"}
+{"path":"Major_League_Baseball"}
 ```
 
 The model began with a broad entity search instead of embedding the whole
@@ -300,7 +301,7 @@ Tool: `wiki_search`
 Relevant result:
 
 ```json
-{"title":"World Series","path":"World_Series"}
+{"path":"World_Series"}
 ```
 
 ### 4. Fetch the World Series Introduction
@@ -338,7 +339,7 @@ Tool: `wiki_search`
 Relevant result:
 
 ```json
-{"title":"List of World Series champions","path":"List_of_World_Series_champions"}
+{"path":"List_of_World_Series_champions"}
 ```
 
 ### 7. Fetch the Champions List Introduction

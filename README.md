@@ -22,7 +22,7 @@ wiki_sections(path)
 wiki_fetch(path, section, segment = 1)
 ```
 
-`wiki_sections` returns non-empty sections in Wikipedia document order. `wiki_fetch` returns native Markdown and segment metadata. Exact article paths and section IDs are required at this service boundary; callers may layer shorter request-scoped handles over them.
+`wiki_search` returns exact article paths without redundant titles (and optional summaries when enabled). `wiki_sections` returns non-empty sections in Wikipedia document order. `wiki_fetch` returns native Markdown, the selected `section`, the `next_section` (or `null` at the end of the article), and `section_pagination` metadata for segments within the selected section. Exact article paths and section IDs are required at this service boundary; callers may layer shorter request-scoped handles over them.
 
 ## Installation & Configuration
 

@@ -507,20 +507,18 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 			throw new Error(`Kiwix returned an unexpected suggestion response from ${suggestionUrl}.`);
 		}
 
-		const prefixResults: Array<{ title: string; path: string }> = [];
+		type SearchResult = { path: string; summary?: string };
+		const prefixResults: SearchResult[] = [];
 		for (const suggestion of suggestions) {
 			if (
 				typeof suggestion === "object" &&
 				suggestion !== null &&
 				"kind" in suggestion &&
 				suggestion.kind === "path" &&
-				"value" in suggestion &&
-				typeof suggestion.value === "string" &&
 				"path" in suggestion &&
 				typeof suggestion.path === "string"
 			) {
 				prefixResults.push({
-					title: decodeHtmlEntities(suggestion.value),
 					path: decodeHtmlEntities(suggestion.path),
 				});
 			}
@@ -529,19 +527,18 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 		const html = await resp.text();
 		const $ = cheerio.load(html);
 
-		const results: Array<{ title: string; path: string } & Partial<{ summary: string }>> = [];
+		const results: SearchResult[] = [];
 		const prefix = `/content/${name}/`;
 		$("div.results li").each((_, li) => {
 			const $a = $(li).find("a").first();
-			const title = $a.text().trim();
 			const href = $a.attr("href") || "";
 			if (!href.startsWith(prefix)) {
 				console.warn(`Skipping search result with unexpected href: ${href}`);
 				return;
 			}
 			const path = href.slice(prefix.length);
-			if (title && path) {
-				const result: any = { title, path };
+			if (path) {
+				const result: SearchResult = { path };
 				if (searchSummaryEnabled) {
 					result.summary = normalizeWhitespace($(li).find("cite").text());
 				}
@@ -600,9 +597,8 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 		followed by full-text matches, with duplicate paths removed.
 		Parameters:
 		- query (required): search term.
-		Returns relevant articles with 'title' and 'path'.
-		There could be an extra 'summary' section if the user enables it.
-		Use the 'path' field (NOT 'title') in 'wiki_fetch' tool to retrieve the article.
+		Returns relevant article paths. Results also include 'summary' if the user enables it.
+		Use the 'path' field in 'wiki_fetch' tool to retrieve the article.
 		`,
 	parameters: {
 		query: z
@@ -646,6 +642,7 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 		- path (required): exact article path from wiki_search.
 		- section (optional, defaults to intro): section ID from wiki_sections (case-insensitive; spaces may replace underscores). Empty or "1" also selects intro.
 		- segment (optional, defaults to 1): 1-based segment. Segments preserve complete Markdown blocks and table rows.
+		Returns the selected section ID, its next section ID (or null at the end of the article), and pagination scoped only to the selected section.
 		`,
 	parameters: {
 		path: z
@@ -666,14 +663,17 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 			const sections = await loadArticleSections(path);
 			if (!sections) return searchArticles(path.replace(/_/g, " "));
 			const sectionKey = normalizeSectionKey(normalizedSection);
-			const selected = sections.find(candidate => normalizeSectionKey(candidate.id) === sectionKey);
-			if (!selected) {
+			const selectedIndex = sections.findIndex(
+				candidate => normalizeSectionKey(candidate.id) === sectionKey
+			);
+			if (selectedIndex === -1) {
 				const suggestion = nearestSectionId(normalizedSection, sections);
 				throw new Error(
 					`Unknown section ID: ${normalizedSection}. Call wiki_sections with path="${path}" and use one of its section IDs.` +
 					(suggestion ? ` Did you mean "${suggestion}"?` : "")
 				);
 			}
+			const selected = sections[selectedIndex];
 
 			const segments = segmentBlocks(selected.blocks, charLimit);
 			if (segment > segments.length) {
@@ -681,8 +681,9 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 			}
 			return {
 				content: segments[segment - 1],
-				section: { id: selected.id },
-				pagination: {
+				section: selected.id,
+				next_section: sections[selectedIndex + 1]?.id ?? null,
+				section_pagination: {
 					segment,
 					totalSegments: segments.length,
 					hasPreviousSegment: segment > 1,
