@@ -298,7 +298,7 @@ function parseArticle($: cheerio.CheerioAPI): ArticleSection[] {
 	const container = $(".mw-parser-output").first();
 	if (!container.length) return [];
 
-	const sections: ArticleSection[] = [{ id: "lead", title: "Lead", level: 1, blocks: [] }];
+	const sections: ArticleSection[] = [{ id: "intro", title: "Intro", level: 1, blocks: [] }];
 	let currentSection = sections[0];
 	container.children().each((_, element) => {
 		const $element = $(element);
@@ -644,7 +644,7 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 		Fetch one intelligently segmented article section, excluding References.
 		Parameters:
 		- path (required): exact article path from wiki_search.
-		- section (required): section ID from wiki_sections (case-insensitive; spaces may replace underscores).
+		- section (optional, defaults to intro): section ID from wiki_sections (case-insensitive; spaces may replace underscores). Empty or "1" also selects intro.
 		- segment (optional, defaults to 1): 1-based segment. Segments preserve complete Markdown blocks and table rows.
 		`,
 	parameters: {
@@ -656,39 +656,41 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 		section: z
 			.string()
 			.trim()
-			.min(1, "section is required; call wiki_sections first")
-			.describe("Case-insensitive section ID from wiki_sections; spaces may replace underscores"),
+			.default("")
+			.describe("Section ID from wiki_sections; empty or '1' selects intro"),
 		segment: z.number().int().min(1).default(1).describe("1-based section segment number"),
 	},
-	implementation: async ({ path, section, segment }) =>
-		runWithLoopGuard("wiki_fetch", { path, section, segment }, async () => {
-		const sections = await loadArticleSections(path);
-		if (!sections) return searchArticles(path.replace(/_/g, " "));
-		const sectionKey = normalizeSectionKey(section);
-		const selected = sections.find(candidate => normalizeSectionKey(candidate.id) === sectionKey);
-		if (!selected) {
-			const suggestion = nearestSectionId(section, sections);
-			throw new Error(
-				`Unknown section ID: ${section}. Call wiki_sections with path="${path}" and use one of its section IDs.` +
-				(suggestion ? ` Did you mean "${suggestion}"?` : "")
-			);
-		}
+	implementation: async ({ path, section, segment }) => {
+		const normalizedSection = section === "" || section === "1" ? "intro" : section;
+		return runWithLoopGuard("wiki_fetch", { path, section: normalizedSection, segment }, async () => {
+			const sections = await loadArticleSections(path);
+			if (!sections) return searchArticles(path.replace(/_/g, " "));
+			const sectionKey = normalizeSectionKey(normalizedSection);
+			const selected = sections.find(candidate => normalizeSectionKey(candidate.id) === sectionKey);
+			if (!selected) {
+				const suggestion = nearestSectionId(normalizedSection, sections);
+				throw new Error(
+					`Unknown section ID: ${normalizedSection}. Call wiki_sections with path="${path}" and use one of its section IDs.` +
+					(suggestion ? ` Did you mean "${suggestion}"?` : "")
+				);
+			}
 
-		const segments = segmentBlocks(selected.blocks, charLimit);
-		if (segment > segments.length) {
-			throw new Error(`Segment ${segment} is out of range (total segments: ${segments.length})`);
-		}
-		return {
-			content: segments[segment - 1],
-			section: { id: selected.id },
-			pagination: {
-				segment,
-				totalSegments: segments.length,
-				hasPreviousSegment: segment > 1,
-				hasNextSegment: segment < segments.length,
-			},
-		};
-	}),
+			const segments = segmentBlocks(selected.blocks, charLimit);
+			if (segment > segments.length) {
+				throw new Error(`Segment ${segment} is out of range (total segments: ${segments.length})`);
+			}
+			return {
+				content: segments[segment - 1],
+				section: { id: selected.id },
+				pagination: {
+					segment,
+					totalSegments: segments.length,
+					hasPreviousSegment: segment > 1,
+					hasNextSegment: segment < segments.length,
+				},
+			};
+		});
+	},
 	});
 
 	return [wikiSearchTool, wikiSectionsTool, wikiFetchTool];
