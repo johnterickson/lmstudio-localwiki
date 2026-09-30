@@ -83,6 +83,7 @@ wiki_search(query)
 - Results contain exact `path` values without redundant titles.
 - Exact or prefix title suggestions are merged ahead of full-text matches.
 - Duplicate paths are removed.
+- Queries longer than seven words are truncated, and the response includes the effective `truncated_query`.
 - The default result limit is five.
 - Search summaries are disabled in the benchmark.
 - A returned `path` must be passed to `wiki_sections`.
@@ -99,18 +100,18 @@ wiki_sections(path)
 ### `wiki_fetch`
 
 ```text
-wiki_fetch(path, section, segment = 1)
+wiki_fetch(path, section_id = "intro", section_page = 1)
 ```
 
 - `path` should be an exact path returned by `wiki_search`.
-- `section` should be an exact ID returned by `wiki_sections`.
+- `section_id` should be an exact ID returned by `wiki_sections`.
 - If the path is not found, its underscores are replaced with spaces and matching `wiki_search` results are returned.
-- One section is returned with the References section removed.
-- `segment` is one-based.
-- The default target segment size is 4,000 characters.
-- Segments preserve complete Markdown blocks. Large tables split only between rows and repeat their headers.
-- Results identify the selected `section` and the `next_section`, which is `null` only at the end of the article.
-- `section_pagination` describes segments within the selected section, not progress through the article.
+- One page from one section is returned with the References section removed.
+- `section_page` is one-based within `section_id`.
+- The default target page size is 4,000 characters.
+- Pages preserve complete Markdown blocks. Large tables split only between rows and repeat their headers.
+- Results include `next.section_id` and `next.section_page`; copy them unchanged into the exact next call.
+- `next` advances within the current section before moving to page 1 of the next section, and is `null` only at the end of the article.
 
 ### Deliberately Removed Surface Area
 
@@ -150,7 +151,7 @@ Which active MLB teams have never been to the World Series?
 ### Successful System Prompt
 
 ```text
-Your internal factual knowledge is limited and may be inaccurate. Use the local Wikipedia tools for factual requests and treat fetched passages as authoritative evidence. Tool calls are cheaper and more reliable than speculative reasoning. Search sparingly with short exact subjects, prefer reading relevant articles and pagination over repeated broad searches, and use Wikipedia as a dictionary when a term is unclear. Do not answer until fetched passages explicitly support every requested fact. Do not overthink, second-guess explicit evidence, or fill gaps from memory. Stop immediately once fetched evidence fully answers the question, then answer concisely in the requested format.
+Your internal factual knowledge is limited and may be inaccurate. Use the local Wikipedia tools for factual requests and treat fetched passages as authoritative evidence. Tool calls are cheaper and more reliable than speculative reasoning. Search sparingly with short exact subjects, prefer following wiki_fetch's next object over repeated broad searches, and use Wikipedia as a dictionary when a term is unclear. Do not answer until fetched passages explicitly support every requested fact. Do not overthink, second-guess explicit evidence, or fill gaps from memory. Stop immediately once fetched evidence fully answers the question, then answer concisely in the requested format.
 ```
 
 This prompt is intentionally fact-neutral. It does not tell the model which
@@ -772,7 +773,7 @@ file records the durable conclusions but is not a substitute for raw logs.
 - Removed `wiki_list`.
 - Removed the model-visible book parameter from search and fetch.
 - Added internal single-ZIM discovery and caching.
-- Updated tool descriptions for exact paths, concise searches, and pagination.
+- Updated tool descriptions for exact paths, concise searches, and page navigation.
 - Made Kiwix full-text search HTTP errors recoverable tool results.
 - Retained hard failures for connectivity and malformed protocol responses.
 
@@ -791,7 +792,7 @@ file records the durable conclusions but is not a substitute for raw logs.
 ## Validation State
 
 - Direct provider smoke test confirmed the model-facing signatures:
-  `wiki_search(query)` and `wiki_fetch(path, page)`.
+  `wiki_search(query)` and `wiki_fetch(path, section_id, section_page)`.
 - Local search and fetch for the Seattle Mariners succeeded.
 - VS Code diagnostics reported no errors in the modified source files.
 - An earlier `esbuild` bundle check passed.

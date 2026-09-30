@@ -84,7 +84,7 @@ async function main() {
       {
         role: "system",
         content:
-          "Your internal factual knowledge is limited and may be inaccurate. Use the local Wikipedia tools for factual requests and treat fetched passages as authoritative evidence. Tool calls are cheaper and more reliable than speculative reasoning. Search sparingly with short exact subjects, prefer reading relevant articles and pagination over repeated broad searches, and use Wikipedia as a dictionary when a term is unclear. Do not answer until fetched passages explicitly support every requested fact. Do not overthink, second-guess explicit evidence, or fill gaps from memory. Stop immediately once fetched evidence fully answers the question, then answer concisely in the requested format.",
+          "Your internal factual knowledge is limited and may be inaccurate. Use the local Wikipedia tools for factual requests and treat fetched passages as authoritative evidence. Tool calls are cheaper and more reliable than speculative reasoning. Search sparingly with short exact subjects, prefer following wiki_fetch's next object over repeated broad searches, and use Wikipedia as a dictionary when a term is unclear. Do not answer until fetched passages explicitly support every requested fact. Do not overthink, second-guess explicit evidence, or fill gaps from memory. Stop immediately once fetched evidence fully answers the question, then answer concisely in the requested format.",
       },
       { role: "user", content: question },
     ],

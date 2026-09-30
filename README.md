@@ -6,7 +6,7 @@ Supercharge your LLM's knowledge base with self-hosted, fully offline wiki artic
 
 *   **Expandable & Upgradable**: Expanding and updating your Kiwix library are made trivial with openZIM files.
 *   **Intentional Retrieval**: Search for an article, list its sections, then fetch only the relevant section.
-*   **Structured Segments**: Article text is cleaned with `cheerio` and returned without the References section. Segments preserve Markdown blocks; tables split only between rows and repeat their headers.
+*   **Structured Pages**: Article text is cleaned with `cheerio` and returned without the References section. Pages preserve Markdown blocks; tables split only between rows and repeat their headers.
 *   **Forgiving Paths**: If an article path returns HTTP 404, underscores are converted to spaces and the value is passed to `wiki_search`; its search results are returned to the model.
 *   **Low Overhead**: Unlike RAG-based semantic search, this tool does not require a vector database. It interacts directly with your self-hosted Kiwix endpoint via its `OPDS API`. Since the vast majority of the content resides on disk, this minimal overhead makes it possible to implement on SBCs / mobile devices.
 
@@ -19,10 +19,10 @@ Supercharge your LLM's knowledge base with self-hosted, fully offline wiki artic
 ```text
 wiki_search(query)
 wiki_sections(path)
-wiki_fetch(path, section, segment = 1)
+wiki_fetch(path, section_id = "intro", section_page = 1)
 ```
 
-`wiki_search` returns exact article paths without redundant titles (and optional summaries when enabled). `wiki_sections` returns non-empty sections in Wikipedia document order. `wiki_fetch` returns native Markdown, the selected `section`, the `next_section` (or `null` at the end of the article), and `section_pagination` metadata for segments within the selected section. Exact article paths and section IDs are required at this service boundary; callers may layer shorter request-scoped handles over them.
+`wiki_search` returns exact article paths without redundant titles (and optional summaries when enabled). Queries longer than seven words are truncated to avoid Kiwix search failures; the response then includes `truncated_query` with the effective query. `wiki_sections` returns non-empty sections in Wikipedia document order. Articles contain ordered sections, and sections contain one or more pages. `wiki_fetch` returns one page plus a `next` object containing the exact `section_id` and `section_page` arguments for the next call. Copy them unchanged. `next` advances through pages before sections and is `null` only at the end of the article.
 
 ## Installation & Configuration
 

@@ -85,6 +85,7 @@ function removeReferencesSection($: cheerio.CheerioAPI): void {
 }
 
 const MAX_REDIRECTS = 5;
+const MAX_SEARCH_QUERY_WORDS = 7;
 
 class HttpError extends Error {
 	constructor(
@@ -105,6 +106,14 @@ function summarizeResponseBody(body: string): string {
 
 function decodeHtmlEntities(value: string): string {
 	return cheerio.load(value).text();
+}
+
+function truncateSearchQuery(query: string): { query: string; truncated: boolean } {
+	const words = normalizeWhitespace(query).split(" ");
+	return {
+		query: words.slice(0, MAX_SEARCH_QUERY_WORDS).join(" "),
+		truncated: words.length > MAX_SEARCH_QUERY_WORDS,
+	};
 }
 
 async function fetchWithRedirects(
@@ -315,41 +324,41 @@ function parseArticle($: cheerio.CheerioAPI): ArticleSection[] {
 function splitTableBlock(block: ArticleBlock, limit: number): string[] {
 	if (!block.tableRows || block.text.length <= limit) return [block.text];
 	const header = block.tableHeader ?? [];
-	const segments: string[] = [];
+	const pages: string[] = [];
 	let lines = [...header];
 
 	for (const row of block.tableRows) {
 		const candidate = [...lines, row].join("\n");
 		if (lines.length > header.length && candidate.length > limit) {
-			segments.push(lines.join("\n"));
+			pages.push(lines.join("\n"));
 			lines = [...header, row];
 		} else {
 			lines.push(row);
 		}
 	}
 	if (lines.length > header.length || (header.length === 0 && lines.length > 0)) {
-		segments.push(lines.join("\n"));
+		pages.push(lines.join("\n"));
 	}
-	return segments;
+	return pages;
 }
 
-function segmentBlocks(blocks: ArticleBlock[], limit: number): string[] {
+function paginateBlocks(blocks: ArticleBlock[], limit: number): string[] {
 	if (limit === -1) return [blocks.map(block => block.text).join("\n\n")];
 	const atomicBlocks = blocks.flatMap(block => splitTableBlock(block, limit));
-	const segments: string[] = [];
+	const pages: string[] = [];
 	let current = "";
 
 	for (const block of atomicBlocks) {
 		const candidate = current ? `${current}\n\n${block}` : block;
 		if (current && candidate.length > limit) {
-			segments.push(current);
+			pages.push(current);
 			current = block;
 		} else {
 			current = candidate;
 		}
 	}
-	if (current || segments.length === 0) segments.push(current);
-	return segments;
+	if (current || pages.length === 0) pages.push(current);
+	return pages;
 }
 
 function normalizeToolArguments(value: unknown): unknown {
@@ -455,14 +464,15 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 
 	const searchArticles = async (query: string) => {
 		const name = await getBookName();
+		const { query: searchQuery, truncated } = truncateSearchQuery(query);
 		const params = new URLSearchParams({
 			"books.name": name,
-			pattern: query,
+			pattern: searchQuery,
 		});
 		const url = new URL(`/search?${params.toString()}`, baseUrl).toString();
 		const suggestionParams = new URLSearchParams({
 			content: name,
-			term: query,
+			term: searchQuery,
 			count: "1",
 			start: "0",
 		});
@@ -474,7 +484,7 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			throw new Error(
-				`Unable to reach Kiwix while searching name="${name}" for query="${query}" at ${url}. ` +
+				`Unable to reach Kiwix while searching name="${name}" for query="${searchQuery}" at ${url}. ` +
 				`Check the configured Kiwix Endpoint and confirm the server is running. Cause: ${message}`
 			);
 		}
@@ -482,7 +492,7 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 			const body = await resp.text().catch(() => "");
 			const responseSummary = summarizeResponseBody(body);
 			throw new Error(
-				`Kiwix returned HTTP ${resp.status} while searching name="${name}" for query="${query}" ` +
+				`Kiwix returned HTTP ${resp.status} while searching name="${name}" for query="${searchQuery}" ` +
 				`at ${resp.url || url}.${responseSummary ? ` Response: ${responseSummary}` : ""}`
 			);
 		}
@@ -491,7 +501,7 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 			const responseSummary = summarizeResponseBody(body);
 			throw new Error(
 				`Kiwix returned HTTP ${suggestionResp.status} while finding an exact or prefix title match ` +
-				`for name="${name}" and query="${query}" at ${suggestionResp.url || suggestionUrl}.` +
+				`for name="${name}" and query="${searchQuery}" at ${suggestionResp.url || suggestionUrl}.` +
 				`${responseSummary ? ` Response: ${responseSummary}` : ""}`
 			);
 		}
@@ -554,7 +564,8 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 
 		return {
 			results: mergedResults.slice(0, searchLimit),
-			hint: text`If the results are irrelevant or empty, try shortening the search query.`
+			...(truncated ? { truncated_query: searchQuery } : {}),
+			hint: text`Search queries are limited to seven words. If the results are irrelevant or empty, retry with fewer, more distinctive words.`
 		};
 	};
 
@@ -596,8 +607,9 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 		Search the local Wikipedia book for articles. Returns the first exact or prefix title match first,
 		followed by full-text matches, with duplicate paths removed.
 		Parameters:
-		- query (required): search term.
+		- query (required): search term, limited to seven words. Longer queries are automatically truncated.
 		Returns relevant article paths. Results also include 'summary' if the user enables it.
+		Truncated responses include 'truncated_query' with the effective query.
 		Use the 'path' field in 'wiki_fetch' tool to retrieve the article.
 		`,
 	parameters: {
@@ -605,7 +617,7 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 			.string()
 			.trim()
 			.min(1, "query is required and cannot be empty")
-			.describe("Non-empty article search term"),
+			.describe("Non-empty article search term; maximum seven words before automatic truncation"),
 	},
 	implementation: async ({ query }) =>
 		runWithLoopGuard("wiki_search", { query }, () => searchArticles(query)),
@@ -637,12 +649,16 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 	const wikiFetchTool = tool({
 		name: "wiki_fetch",
 		description: text`
-		Fetch one intelligently segmented article section, excluding References.
+		Fetch one page from a Wikipedia article, excluding References.
+		Articles contain ordered sections, and each section contains one or more pages.
 		Parameters:
 		- path (required): exact article path from wiki_search.
-		- section (optional, defaults to intro): section ID from wiki_sections (case-insensitive; spaces may replace underscores). Empty or "1" also selects intro.
-		- segment (optional, defaults to 1): 1-based segment. Segments preserve complete Markdown blocks and table rows.
-		Returns the selected section ID, its next section ID (or null at the end of the article), and pagination scoped only to the selected section.
+		- section_id (optional, defaults to intro): section ID from wiki_sections (case-insensitive; spaces may replace underscores). Empty or "1" selects intro.
+		- section_page (optional, defaults to 1): 1-based page number within section_id.
+		Pages preserve complete Markdown blocks and table rows.
+		The response's 'next' object gives the exact section_id and section_page arguments for the next wiki_fetch call; copy them unchanged.
+		'next' advances to the next page in the current section, then page 1 of the next section.
+		'next' is null only when the current page is the end of the entire article.
 		`,
 	parameters: {
 		path: z
@@ -650,47 +666,52 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 			.trim()
 			.min(1, "path is required; call wiki_search and use its exact path field")
 			.describe("Exact article path returned by wiki_search for the same book"),
-		section: z
+		section_id: z
 			.string()
 			.trim()
 			.default("")
 			.describe("Section ID from wiki_sections; empty or '1' selects intro"),
-		segment: z.number().int().min(1).default(1).describe("1-based section segment number"),
+		section_page: z.number().int().min(1).default(1).describe("1-based page number within section_id"),
 	},
-	implementation: async ({ path, section, segment }) => {
-		const normalizedSection = section === "" || section === "1" ? "intro" : section;
-		return runWithLoopGuard("wiki_fetch", { path, section: normalizedSection, segment }, async () => {
-			const sections = await loadArticleSections(path);
-			if (!sections) return searchArticles(path.replace(/_/g, " "));
-			const sectionKey = normalizeSectionKey(normalizedSection);
-			const selectedIndex = sections.findIndex(
-				candidate => normalizeSectionKey(candidate.id) === sectionKey
-			);
-			if (selectedIndex === -1) {
-				const suggestion = nearestSectionId(normalizedSection, sections);
-				throw new Error(
-					`Unknown section ID: ${normalizedSection}. Call wiki_sections with path="${path}" and use one of its section IDs.` +
-					(suggestion ? ` Did you mean "${suggestion}"?` : "")
+	implementation: async ({ path, section_id, section_page }) => {
+		const normalizedSection = section_id === "" || section_id === "1" ? "intro" : section_id;
+		return runWithLoopGuard(
+			"wiki_fetch",
+			{ path, section_id: normalizedSection, section_page },
+			async () => {
+				const sections = await loadArticleSections(path);
+				if (!sections) return searchArticles(path.replace(/_/g, " "));
+				const sectionKey = normalizeSectionKey(normalizedSection);
+				const selectedIndex = sections.findIndex(
+					candidate => normalizeSectionKey(candidate.id) === sectionKey
 				);
-			}
-			const selected = sections[selectedIndex];
+				if (selectedIndex === -1) {
+					const suggestion = nearestSectionId(normalizedSection, sections);
+					throw new Error(
+						`Unknown section ID: ${normalizedSection}. Call wiki_sections with path="${path}" and use one of its section IDs.` +
+						(suggestion ? ` Did you mean "${suggestion}"?` : "")
+					);
+				}
+				const selected = sections[selectedIndex];
 
-			const segments = segmentBlocks(selected.blocks, charLimit);
-			if (segment > segments.length) {
-				throw new Error(`Segment ${segment} is out of range (total segments: ${segments.length})`);
+				const pages = paginateBlocks(selected.blocks, charLimit);
+				if (section_page > pages.length) {
+					throw new Error(
+						`Page ${section_page} is out of range for section "${selected.id}" (total pages: ${pages.length}). ` +
+						`Use the 'next' object from the previous wiki_fetch response to continue through the article.`
+					);
+				}
+				const next = section_page < pages.length
+					? { section_id: selected.id, section_page: section_page + 1 }
+					: sections[selectedIndex + 1]
+						? { section_id: sections[selectedIndex + 1].id, section_page: 1 }
+						: null;
+				return {
+					content: pages[section_page - 1],
+					next,
+				};
 			}
-			return {
-				content: segments[segment - 1],
-				section: selected.id,
-				next_section: sections[selectedIndex + 1]?.id ?? null,
-				section_pagination: {
-					segment,
-					totalSegments: segments.length,
-					hasPreviousSegment: segment > 1,
-					hasNextSegment: segment < segments.length,
-				},
-			};
-		});
+		);
 	},
 	});
 
