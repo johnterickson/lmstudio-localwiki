@@ -4,6 +4,7 @@ import * as cheerio from "cheerio";
 import type { AnyNode, Element } from "domhandler";
 import fetch from "node-fetch";
 import { configSchematics } from "./config";
+import { articlePathNotFoundMessage, repeatedToolCallMessage } from "./toolGuidance";
 
 const normalizeWhitespace = (s: string) => s.replace(/\s+/g, " ").trim();
 
@@ -431,9 +432,7 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 		const previousCalls = attemptedToolCalls.get(callKey) ?? 0;
 		if (previousCalls > 0) {
 			attemptedToolCalls.set(callKey, previousCalls + 1);
-			throw new Error(
-				`Repeated identical ${toolName} call. Use the earlier result, or change the arguments.`
-			);
+			throw new Error(repeatedToolCallMessage(toolName));
 		}
 
 		if (attemptedToolCalls.size >= maxTrackedToolCalls) {
@@ -641,7 +640,7 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 		},
 		implementation: async ({ path }) => runWithLoopGuard("wiki_sections", { path }, async () => {
 			const sections = await loadArticleSections(path);
-			if (!sections) return searchArticles(path.replace(/_/g, " "));
+			if (!sections) throw new Error(articlePathNotFoundMessage(path));
 			return {
 				sections: sections.map(section => ({
 					id: section.id,
@@ -685,7 +684,7 @@ export async function toolsProvider(ctl: ToolsProviderController) {
 			{ path, section_id: normalizedSection, section_page },
 			async () => {
 				const sections = await loadArticleSections(path);
-				if (!sections) return searchArticles(path.replace(/_/g, " "));
+				if (!sections) throw new Error(articlePathNotFoundMessage(path));
 				const sectionKey = normalizeSectionKey(normalizedSection);
 				const selectedIndex = sections.findIndex(
 					candidate => normalizeSectionKey(candidate.id) === sectionKey
