@@ -11,7 +11,7 @@ const normalizeWhitespace = (s: string) => s.replace(/\s+/g, " ").trim();
 function extractText(
 	$el: cheerio.Cheerio<AnyNode>,
 	$: cheerio.CheerioAPI,
-	options: { removeSup?: boolean; externalLinksAsUrl?: boolean; internalLinksAsMarkdown?: boolean } = {}
+	options: { removeSup?: boolean; externalLinksAsUrl?: boolean; internalLinksAsMarkdown?: boolean; preserveLineBreaks?: boolean } = {}
 ): string {
 	let result = "";
 	$el.contents().each((_, node) => {
@@ -22,7 +22,9 @@ function extractText(
 			if (tag === "sup" && options.removeSup) {
 				return;
 			}
-			if (tag === "a") {
+			if (tag === "br" && options.preserveLineBreaks) {
+				result += "<br>";
+			} else if (tag === "a") {
 				const href = $(node).attr("href") || "";
 				const linkText = $(node).text().trim();
 				if (options.externalLinksAsUrl && /^https?:\/\//i.test(href)) {
@@ -167,7 +169,7 @@ async function fetchWithRedirects(
 	return { html, finalUrl: currentUrl.split("#")[0], fragment: fragmentFromInput };
 }
 
-function tableToMarkdown($table: cheerio.Cheerio<AnyNode>, $: cheerio.CheerioAPI): string {
+export function tableToMarkdown($table: cheerio.Cheerio<AnyNode>, $: cheerio.CheerioAPI): string {
 	const rows: string[][] = [];
 	let maxCols = 0;
 	let hasHeader = false;
@@ -178,7 +180,12 @@ function tableToMarkdown($table: cheerio.Cheerio<AnyNode>, $: cheerio.CheerioAPI
 		$tr.children("th, td").each((_, cell) => {
 			const $cell = $(cell);
 			let cellText = normalizeWhitespace(
-				extractText($cell, $, { removeSup: false, externalLinksAsUrl: true, internalLinksAsMarkdown: true })
+				extractText($cell, $, {
+					removeSup: false,
+					externalLinksAsUrl: true,
+					internalLinksAsMarkdown: true,
+					preserveLineBreaks: true,
+				})
 			);
 			cellText = cellText.replace(/\|/g, "\\|");
 			cells.push(cellText);
